@@ -1,0 +1,657 @@
+#Load the Japan Dataset and Check columns
+import os
+import pandas as pd
+import numpy as np
+from datetime import datetime
+import matplotlib.pyplot as plt
+import seaborn as sns
+from matplotlib.ticker import FuncFormatter
+
+# Define file paths
+file_path = r"C:\Users\Japan RentRoll.csv"
+output_dir = os.path.dirname(file_path)
+
+# Load the CSV data
+df = pd.read_csv(file_path, low_memory=False)
+print(f"Total columns: {len(df.columns)}")
+print(f"Original dataset has {len(df)} rows")
+
+#Get column title
+column_titles = list(df.columns)
+print("All column titles:")
+print(column_titles)
+
+
+# 1 Remove and save duplicates to get the most recent data for each lease
+df = df.sort_values(by='Last Completed At', ascending=False)
+deduplicated_df = df.drop_duplicates(
+   subset=['Tenant Name', 'Unit Id', 'Property Id',
+           'Lease Start Date', 'Lease Expiry Date'], 
+   keep='first'
+)
+print(f"After deduplication: {len(deduplicated_df)} rows")
+print(f"Removed {len(df) - len(deduplicated_df)} duplicate rows")
+
+#Save deduplicated data
+dedup_path = os.path.join(output_dir, 'deduplicated_RentRoll.csv')
+deduplicated_df.to_csv(dedup_path, index=False)
+
+# 2 Analyze null values and Remove null values
+# Get null counts and percentages
+null_counts = deduplicated_df.isnull().sum()
+null_percentages = (null_counts / len(deduplicated_df) * 100).round(2)
+null_summary = pd.DataFrame({
+    'Column Name': null_counts.index,
+    'Null Count': null_counts.values,
+    'Null Percentage': null_percentages.values
+})
+
+null_summary = null_summary.sort_values('Null Percentage', ascending=False)
+
+print("\nColumns with null values:")
+print(null_summary)
+
+# 2.1 Remove completely empty columns and specific columns
+# Identify completely null columns (100% null)
+completely_null_columns = null_summary[null_summary['Null Percentage'] == 100]['Column Name'].tolist()
+print(f"Found {len(completely_null_columns)} completely empty columns (100% null):")
+print(completely_null_columns)
+
+# Specific columns (repeated/Meaningless) to move
+specific_columns_to_remove = [
+   'Contracted Rent Inc All Tenant Payments Pa', 
+   'Property Last Updated At', 
+   'Rental Income Valid To','Has Step Rent','Tenant Has Indexation','Project Name','Occupied','Contracted Lettable Area Sqm'
+    ,'Contracted Rent Sqm Pa Unit','Net Rent Pa','Sum of CONTRACTED_RENT_SQM_PA_UNIT','Rentroll Currency','Last Completed At', 'Address', 'Country'
+    , 'Walt First Break Expiry', 'Building Name','Persistent Unit Id'
+]
+print(f"\nSpecifically requested columns to remove:")
+print(specific_columns_to_remove) 
+
+# Combine all columns to remove
+all_columns_to_remove = list(set(completely_null_columns + specific_columns_to_remove))
+print(f"\nRemoving a total of {len(all_columns_to_remove)} unnecessary columns:")
+print(all_columns_to_remove) 
+
+cleaned_df = deduplicated_df.drop(columns=all_columns_to_remove)
+print(f"After column cleaning: {len(cleaned_df.columns)} columns remaining")
+
+
+# 2.2 Identify critical columns for property/unit-based valuation
+# Critical columns for property/unit-based valuation
+property_critical_columns = [
+    'Property Id',       
+    'Unit Id',           
+    'Contracted Rent Pa', 
+    'Contracted Lettable Area Sqm', 
+    'Lease Start Date', 
+    'Lease Expiry Date'  
+]
+
+# Check availability and null percentages for critical columns
+critical_availability = {}
+for col in property_critical_columns:
+    if col in cleaned_df.columns:
+        if col in null_summary.index:
+            null_pct = null_summary.loc[col, 'Null Percentage']
+        else:
+            null_pct = (cleaned_df[col].isnull().sum() / len(cleaned_df) * 100).round(2)
+        critical_availability[col] = {
+            'available': True,
+            'null_percentage': null_pct
+        }
+    else:
+        critical_availability[col] = {
+            'available': False,
+            'null_percentage': 100.0
+        }
+
+# Display critical column status
+print("Status of critical property valuation columns:")
+for col, status in critical_availability.items():
+    if status['available']:
+        print(f"- {col}: Available with {status['null_percentage']}% null values")
+    else:
+        print(f"- {col}: NOT AVAILABLE")
+# 2.3 Filter out rows with missing critical data for property valuation
+# For property valuation, these are the absolute must-have fields
+critical_for_valuation = ['Property Id', 'Lease Start Date', 'Lease Expiry Date']
+
+# Check how many rows would be affected by filtering
+rows_with_missing = cleaned_df[cleaned_df[critical_for_valuation].isnull().any(axis=1)]
+missing_count = len(rows_with_missing)
+total_count = len(cleaned_df)
+
+print(f"Found {missing_count} rows ({missing_count/total_count*100:.2f}%) with missing critical data:")
+for col in critical_for_valuation:
+    null_count = cleaned_df[col].isnull().sum()
+    if null_count > 0:
+        print(f"- {col}: {null_count} null values ({null_count/total_count*100:.2f}%)")
+
+# Analyze which properties are most affected by missing data
+if missing_count > 0:
+    missing_by_property = rows_with_missing.groupby('Property Id').size().sort_values(ascending=False)
+    property_count = missing_by_property.count()
+    print(f"Missing data affects {property_count} properties")
+    
+    if property_count > 0:
+        print("\nTop 5 properties with most missing data:")
+        for prop_id, count in missing_by_property.head(5).items():
+            property_total = cleaned_df[cleaned_df['Property Id'] == prop_id].shape[0]
+            print(f"- Property {prop_id}: {count}/{property_total} rows ({count/property_total*100:.1f}%)")
+
+# Remove rows with missing critical data
+cleaned_df_filtered = cleaned_df.dropna(subset=critical_for_valuation)
+
+# Report on the filtered dataset
+retained_count = len(cleaned_df_filtered)
+print(f"\nAfter filtering: {retained_count} rows retained ({retained_count/total_count*100:.2f}% of original data)")
+print(f"Removed {total_count - retained_count} rows with missing critical data")
+
+# For 'Contracted Rent Pa' with 16.26% nulls - flag these rows but keep them
+if 'Contracted Rent Pa' in cleaned_df_filtered.columns:
+    rent_nulls = cleaned_df_filtered['Contracted Rent Pa'].isnull().sum()
+    if rent_nulls > 0:
+        print(f"\nNote: {rent_nulls} rows ({rent_nulls/retained_count*100:.2f}%) have missing Contracted Rent Pa")
+        cleaned_df_filtered['Has_Rent_Data'] = cleaned_df_filtered['Contracted Rent Pa'].notnull()
+        print("Added 'Has_Rent_Data' flag to identify rows with valid rent information")
+
+# Update our main dataframe to use the filtered version
+cleaned_df = cleaned_df_filtered
+
+
+# 2.4 Check the original number of rows
+original_row_count = len(cleaned_df)
+print(f"Original row count: {original_row_count}")
+
+# Check how many rows have null Lease Expiry Date
+null_expiry_count = cleaned_df['Lease Expiry Date'].isnull().sum()
+print(f"Rows with null Lease Expiry Date: {null_expiry_count}")
+
+# Remove rows with null Lease Expiry Date
+cleaned_df = cleaned_df.dropna(subset=['Lease Expiry Date'])
+
+# Check the new row count
+new_row_count = len(cleaned_df)
+print(f"New row count: {new_row_count}")
+print(f"Removed {original_row_count - new_row_count} rows with null Lease Expiry Date")
+
+# Verify there are no more nulls in Lease Expiry Date
+remaining_nulls = cleaned_df['Lease Expiry Date'].isnull().sum()
+print(f"Remaining null values in Lease Expiry Date: {remaining_nulls}")
+
+
+# Summarize the current dataset after cleaning and filtering
+# Get remaining columns
+remaining_columns = list(cleaned_df.columns)
+print(f"Dataset now contains {len(cleaned_df)} rows and {len(remaining_columns)} columns")
+
+# Show all remaining columns
+print("\nRemaining columns:")
+for i, col in enumerate(remaining_columns):
+   print(f"{i+1}. {col}")
+
+# Check for any remaining null values
+current_null_counts = cleaned_df.isnull().sum()
+current_null_percentages = (current_null_counts / len(cleaned_df) * 100).round(2)
+
+# Create an updated null summary
+current_null_summary = pd.DataFrame({
+   'Column Name': current_null_counts.index,
+   'Null Count': current_null_counts.values,
+   'Null Percentage': current_null_percentages.values
+})
+
+if len(current_null_summary) > 0:
+   print("\nColumns & null values:")
+   print(current_null_summary)
+else:
+   print("\nNo null values remain in the dataset")
+
+
+# 2.5 Handle null values
+# Define columns that need null handling
+null_columns = ['Tenant Name', 'Lease Rent Payment Start Date']
+
+# Create a copy of the DataFrame to avoid SettingWithCopyWarning
+# This ensures we're working with a new DataFrame, not a view
+cleaned_df = cleaned_df.copy()
+
+# 1. Tenant Name 
+null_tenant_count = cleaned_df['Tenant Name'].isnull().sum()
+print(f"Found {null_tenant_count} rows with null Tenant Name ({null_tenant_count/len(cleaned_df)*100:.2f}%)")
+
+# For null tenant names, replace with "Unknown Tenant"
+if null_tenant_count > 0:
+   # Use .loc to avoid the warning
+   cleaned_df.loc[cleaned_df['Tenant Name'].isnull(), 'Tenant Name'] = 'Unknown Tenant'
+   print("Replaced null Tenant Name values with 'Unknown Tenant'")
+
+# 2. Lease Rent Payment Start Date 
+null_payment_date_count = cleaned_df['Lease Rent Payment Start Date'].isnull().sum()
+print(f"Found {null_payment_date_count} rows with null Lease Rent Payment Start Date ({null_payment_date_count/len(cleaned_df)*100:.2f}%)")
+
+# For null payment start dates, use Lease Start Date as a proxy
+if null_payment_date_count > 0:
+   cleaned_df.loc[cleaned_df['Lease Rent Payment Start Date'].isnull(), 'Lease Rent Payment Start Date'] = cleaned_df.loc[cleaned_df['Lease Rent Payment Start Date'].isnull(), 'Lease Start Date']
+   print("Replaced null Lease Rent Payment Start Date values with Lease Start Date")
+
+# Verify all nulls are handled
+remaining_nulls = cleaned_df[null_columns].isnull().sum()
+print("\nRemaining null values after handling:")
+for col, null_count in remaining_nulls.items():
+   if null_count > 0:
+       print(f"- {col}: {null_count} nulls")
+   else:
+       print(f"- {col}: No nulls remaining")
+
+
+# Final Summary
+# Calculate null counts and percentages for all columns
+final_null_counts = cleaned_df.isnull().sum()
+final_null_percentages = (final_null_counts / len(cleaned_df) * 100).round(2)
+
+final_summary = pd.DataFrame({
+   'Column Name': final_null_counts.index,
+   'Null Count': final_null_counts.values,
+   'Null Percentage': final_null_percentages.values
+})
+
+final_summary = final_summary.sort_values('Column Name')
+print(final_summary)
+
+# Check if dataset is completely free of nulls
+total_nulls = final_null_counts.sum()
+if total_nulls == 0:
+   print("\nDataset cointains no null value.")
+else:
+   print(f"\nDataset still contains {total_nulls} null values across all columns.")
+
+
+# 3 Date conversion
+# Create a fresh copy for visualization
+viz_df = cleaned_df.copy()
+
+# Define date columns
+date_columns = ['Lease Start Date', 'Lease Expiry Date', 'Lease Rent Payment Start Date']
+
+# Step 1: Clean date strings by removing time components
+for col in date_columns:
+   # Remove time component if present (anything after space)
+   if viz_df[col].dtype == object:  # Check if it's string/object column
+       viz_df[col] = viz_df[col].astype(str).str.split(' ').str[0]
+       print(f"Removed time component from {col}")
+
+# Step 2: Convert to datetime
+for col in date_columns:
+   viz_df[col] = pd.to_datetime(viz_df[col], errors='coerce')
+   
+   # Check if any couldn't be converted
+   null_count = viz_df[col].isnull().sum()
+   if null_count > 0:
+       print(f"Warning: {null_count} values in {col} couldn't be converted to datetime")
+
+# Step 3: Check date ranges and handle outliers
+for col in date_columns:
+   min_date = viz_df[col].min()
+   max_date = viz_df[col].max()
+   print(f"{col} range: {min_date} to {max_date}")
+   
+   # Identify any unusual dates (far in the future)
+   future_cutoff = pd.Timestamp.now() + pd.DateOffset(years=50)
+   far_future_mask = viz_df[col] > future_cutoff
+   far_future_count = far_future_mask.sum()
+   
+   if far_future_count > 0:
+       print(f"Found {far_future_count} dates in {col} that are more than 50 years in the future")
+       # Flag these rows
+       viz_df[f'{col}_Far_Future'] = far_future_mask
+
+# Step 4: Calculate lease term for visualization
+viz_df['Lease_Term_Years'] = (viz_df['Lease Expiry Date'] - viz_df['Lease Start Date']).dt.days / 365.25
+
+# Identify unusually long lease terms
+long_term_mask = viz_df['Lease_Term_Years'] > 50
+long_term_count = long_term_mask.sum()
+
+if long_term_count > 0:
+   print(f"Found {long_term_count} leases with terms longer than 50 years")
+   # Create a capped version for better visualization
+   viz_df['Lease_Term_Years_Capped'] = viz_df['Lease_Term_Years'].clip(upper=30)
+   print("Created capped lease term column for visualization (maximum 30 years)")
+else:
+   viz_df['Lease_Term_Years_Capped'] = viz_df['Lease_Term_Years']
+
+
+# 4 Convert important columns to appropriate data types
+viz_df = viz_df.copy()
+
+# 1. Convert Property Id to integer7
+try:
+    # First check if it's already numeric
+    if pd.api.types.is_numeric_dtype(viz_df['Property Id']):
+        viz_df['Property Id'] = viz_df['Property Id'].astype(int)
+    else:
+        # Try to convert from string to integer
+        viz_df['Property Id'] = viz_df['Property Id'].astype(float).astype(int)
+    print("Converted Property Id to integer")
+except Exception as e:
+    print(f"Could not convert Property Id to integer: {e}")
+    print("Keeping original Property Id format")
+
+# 2. Unit Id is alphanumeric - keep as is
+print("Keeping Unit Id as alphanumeric (contains non-numeric characters)")
+
+# 3. Ensure Contracted Rent Pa is numeric
+try:
+    viz_df['Contracted Rent Pa'] = pd.to_numeric(viz_df['Contracted Rent Pa'])
+    print("Ensured Contracted Rent Pa is numeric")
+except Exception as e:
+    print(f"Issue with Contracted Rent Pa conversion: {e}")
+
+# 4. Make sure calculated lease terms are numeric
+for col in ['Lease_Term_Years', 'Lease_Term_Years_Capped']:
+    if col in viz_df.columns:
+        viz_df[col] = pd.to_numeric(viz_df[col], errors='coerce')
+
+print("Data type preprocessing complete")
+
+
+#Visualization for Cleaned Dataset
+viz_dir = os.path.join(output_dir, 'visualizations')
+os.makedirs(viz_dir, exist_ok=True)
+
+# Set up the visualization style
+plt.style.use('seaborn-v0_8-whitegrid')
+sns.set_palette("Set2")
+plt.rcParams['figure.figsize'] = (12, 8)
+plt.rcParams['font.size'] = 12
+
+# 1. Property Portfolio Overview
+property_counts = viz_df.groupby('Property Id')['Unit Id'].nunique()
+top_properties = property_counts.sort_values(ascending=False).head(10)
+
+# Create meaningful labels for each property
+property_labels = []
+for prop_id in top_properties.index:
+    # Get the property name for this property ID
+    prop_data = viz_df[viz_df['Property Id'] == prop_id]
+    if not prop_data.empty:
+        prop_name = prop_data['Property Name'].iloc[0]
+        property_labels.append(f"Property {prop_id} ({prop_name})")
+    else:
+        property_labels.append(f"Property {prop_id}")
+
+# Reverse the order for both data and labels so highest count is at the top
+top_properties = top_properties.iloc[::-1]
+property_labels = property_labels[::-1]
+
+# Create the bar chart with better labels
+plt.figure(figsize=(12, 7))
+bars = plt.barh(range(len(top_properties)), top_properties.values, color='skyblue')
+plt.yticks(range(len(top_properties)), property_labels)
+plt.title('Top 10 Properties by Unit Count')
+plt.xlabel('Unit Count')
+plt.ylabel('Property ID and Name')
+plt.grid(False)
+
+# Add count labels to the end of each bar
+for i, (prop, count) in enumerate(zip(top_properties.index, top_properties.values)):
+    plt.text(count + 0.5, i, str(int(count)), va='center')
+
+plt.tight_layout()
+plt.savefig(os.path.join(viz_dir, '01_top_properties.png'), dpi=300)
+print(f"Saved to {os.path.join(viz_dir, '01_top_properties.png')}")
+plt.show()
+plt.close()
+
+
+# 2. Use Type Distribution 
+plt.figure(figsize=(12, 6))
+use_type_counts = viz_df['Use Type Full'].value_counts().sort_values(ascending=False)
+use_type_pcts = (use_type_counts / len(viz_df) * 100).round(1)
+
+# Create bar chart with percentage labels
+bars = plt.bar(use_type_counts.index, use_type_counts.values, color='skyblue')
+
+# Add percentage labels on top of bars
+for i, (label, count, pct) in enumerate(zip(use_type_counts.index, use_type_counts.values, use_type_pcts)):
+   plt.text(i, count + 0.5, f"{pct}%", ha='center')
+
+plt.title('Distribution of Property Use Types')
+plt.xlabel('Use Type')
+plt.ylabel('Number of Leases')
+plt.xticks(rotation=45, ha='right')
+plt.grid(False)
+plt.tight_layout()
+plt.savefig(os.path.join(viz_dir, '02_use_type_distribution.png'), dpi=300)
+print(f"Saved to {os.path.join(viz_dir, '02_use_type_distribution.png')}")
+plt.show()
+plt.close()
+
+
+# 3. Lease Start/End Year Distribution with specific ranges and integer year labels
+# Extract years from dates
+start_years = viz_df['Lease Start Date'].dt.year
+end_years = viz_df['Lease Expiry Date'].dt.year
+
+# Create a plot with two subplots side by side
+fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
+
+# Plot lease start years - filter to 2012-2025 range
+start_year_counts = start_years.value_counts().sort_index()
+start_year_filtered = start_year_counts[(start_year_counts.index >= 2012) & (start_year_counts.index <= 2025)]
+ax1.bar(start_year_filtered.index, start_year_filtered.values)
+ax1.set_title('Lease Start Year Distribution (2012-2025)')
+ax1.set_xlabel('Start Year')
+ax1.set_ylabel('Number of Leases')
+
+# Set explicit x-ticks to ensure integers
+start_years_range = range(2012, 2026)
+ax1.set_xticks(start_years_range)
+ax1.set_xticklabels([str(year) for year in start_years_range], rotation=45)
+ax1.grid(False)
+
+# Plot lease end years - filter to 2020-2040 range
+end_year_counts = end_years.value_counts().sort_index()
+end_year_filtered = end_year_counts[(end_year_counts.index >= 2020) & (end_year_counts.index <= 2040)]
+ax2.bar(end_year_filtered.index, end_year_filtered.values, color='orange')
+ax2.set_title('Lease Expiry Year Distribution (2020-2040)')
+ax2.set_xlabel('Expiry Year')
+ax2.set_ylabel('Number of Leases')
+
+# Set explicit x-ticks to ensure integers, with every 2nd year to avoid crowding
+end_years_range = range(2020, 2041, 2)  # Step by 2 to avoid crowding
+ax2.set_xticks(end_years_range)
+ax2.set_xticklabels([str(year) for year in end_years_range], rotation=45)
+ax2.grid(False)
+
+plt.tight_layout()
+plt.savefig(os.path.join(viz_dir, '03_lease_years_distribution.png'), dpi=300)
+print(f"Saved to {os.path.join(viz_dir, '03_lease_years_distribution.png')}")
+plt.show()
+plt.close()
+
+
+
+# 4. Lease Term Distribution
+plt.figure(figsize=(12, 6))
+
+# Use the capped lease term for better visualization
+sns.histplot(viz_df['Lease_Term_Years_Capped'], bins=30, kde=True)
+plt.title('Distribution of Lease Terms (Capped at 30 Years)')
+plt.xlabel('Lease Term (Years)')
+plt.ylabel('Number of Leases')
+
+# Add median line with label
+median_term = viz_df['Lease_Term_Years_Capped'].median()
+plt.axvline(median_term, color='red', linestyle='--', 
+           label=f'Median: {median_term:.1f} years')
+
+# Add mean line with label
+mean_term = viz_df['Lease_Term_Years_Capped'].mean()
+plt.axvline(mean_term, color='green', linestyle='-', 
+           label=f'Mean: {mean_term:.1f} years')
+
+# Add legend
+plt.legend()
+
+# Format x-axis to show whole numbers
+plt.xticks(range(0, 31, 5))  # Show ticks at 0, 5, 10, 15, 20, 25, 30
+
+# Remove grid
+plt.grid(False)
+
+plt.tight_layout()
+plt.savefig(os.path.join(viz_dir, '04_lease_term_distribution.png'), dpi=300)
+print(f"Saved to {os.path.join(viz_dir, '04_lease_term_distribution.png')}")
+plt.show()
+plt.close()
+
+
+# 5. Contracted Rent Distribution
+plt.figure(figsize=(12, 6))
+
+# Remove outliers for better visualization
+mean_rent = viz_df['Contracted Rent Pa'].mean()
+std_rent = viz_df['Contracted Rent Pa'].std()
+rent_for_plot = viz_df[viz_df['Contracted Rent Pa'] < (mean_rent + 3*std_rent)]['Contracted Rent Pa']
+
+# Create histogram with KDE line
+sns.histplot(rent_for_plot, kde=True, bins=50, color='skyblue')
+
+# Add title and labels
+plt.title('Distribution of Contracted Rent (Excluding Outliers)')
+plt.xlabel('Annual Contracted Rent')
+plt.ylabel('Number of Leases')
+
+# Add mean and median lines
+mean_value = rent_for_plot.mean()
+median_value = rent_for_plot.median()
+plt.axvline(mean_value, color='red', linestyle='--', label=f'Mean: {mean_value:,.0f}')
+plt.axvline(median_value, color='green', linestyle='-', label=f'Median: {median_value:,.0f}')
+plt.legend()
+
+# Format x-axis with comma for thousands
+plt.gca().xaxis.set_major_formatter(FuncFormatter(lambda x, _: f'{int(x):,}'))
+
+# Remove grid
+plt.grid(False)
+
+plt.tight_layout()
+plt.savefig(os.path.join(viz_dir, '05_rent_distribution.png'), dpi=300)
+print(f"Saved to {os.path.join(viz_dir, '05_rent_distribution.png')}")
+plt.show()
+plt.close()
+
+
+# 6. Lease Expiry Timeline by Year (Based on actual dataset structure)
+plt.figure(figsize=(14, 7))
+
+# Group by year for expiry dates
+viz_df['Expiry_Year'] = viz_df['Lease Expiry Date'].dt.year
+
+# Determine current year based on the dataset context
+current_year = pd.Timestamp.now().year  # 2025 based on your reference date
+
+# Count expirations by year
+expiry_counts = viz_df['Expiry_Year'].value_counts().sort_index()
+
+# Limit to 2020-2040 range
+expiry_counts = expiry_counts[(expiry_counts.index >= 2020) & (expiry_counts.index <= 2040)]
+
+# Create the bar chart
+bars = plt.bar(expiry_counts.index, expiry_counts.values)
+
+# Color bars differently based on whether they're past, present or future
+for i, bar in enumerate(bars):
+   year = expiry_counts.index[i]
+   if year < current_year:
+       bar.set_color('lightgray')  # Historical leases (already expired)
+   elif year == current_year:
+       bar.set_color('gold')       # Current year leases
+   else:
+       bar.set_color('coral')      # Future leases
+
+# Add data labels on top of bars
+for i, (year, count) in enumerate(expiry_counts.items()):
+   plt.text(year, count + max(expiry_counts)*0.02, str(count), ha='center')
+
+# Add title and labels
+plt.title('Lease Expiry Timeline (2020-2040)')
+plt.xlabel('Expiry Year')
+plt.ylabel('Number of Leases')
+
+# Add explanation of what the chart shows
+plt.figtext(0.5, 0.01, 
+          "This chart shows the distribution of lease expiry dates across years.\n"
+          "Gray bars: Historical leases that have already expired. Gold: Current year. Coral: Future expirations.", 
+          ha='center', fontsize=9, style='italic')
+
+# Improve x-axis appearance
+plt.xticks(range(2020, 2041, 2), rotation=45)  # Show every 2nd year for clarity
+plt.xlim(2019.5, 2040.5)  # Add slight padding
+
+# Add vertical line at current year
+plt.axvline(x=current_year, color='black', linestyle='--', 
+           label=f'Current Year ({current_year})')
+
+# Add legend
+legend_elements = [
+   plt.Line2D([0], [0], color='black', linestyle='--', label=f'Current Year ({current_year})'),
+   plt.Rectangle((0,0), 1, 1, color='lightgray', label='Historical Leases'),
+   plt.Rectangle((0,0), 1, 1, color='gold', label='Current Year Leases'),
+   plt.Rectangle((0,0), 1, 1, color='coral', label='Future Leases')
+]
+plt.legend(handles=legend_elements, loc='upper right')
+
+# Add grid for horizontal lines only
+plt.grid(False)
+
+plt.tight_layout(rect=[0, 0.05, 1, 0.97])  # Make room for note at bottom
+plt.savefig(os.path.join(viz_dir, '06_lease_expiry_timeline.png'), dpi=300)
+print(f"Saved to {os.path.join(viz_dir, '06_lease_expiry_timeline.png')}")
+plt.show()
+plt.close()
+
+import pickle
+pickle_path = os.path.join(output_dir, 'japan_rentroll_cleaned.pkl')
+with open(pickle_path, 'wb') as f:
+    pickle.dump(viz_df, f)
+print(f"Saved cleaned dataset (with preserved data types) to: {pickle_path}")
+
+# Display final column information after full preprocessing
+print("\n=== FINAL CLEANED DATASET ===")
+print(f"Rows: {len(viz_df):,}")
+print(f"Columns: {len(viz_df.columns)}")
+
+print("\nFinal Column List:")
+for i, col in enumerate(viz_df.columns, 1):
+    print(f"{i}. {col}")
+
+# Display data types and examples
+print("\nColumn Types and Examples:")
+for col in viz_df.columns:
+    dtype = str(viz_df[col].dtype)  # Convert dtype to string
+    sample = viz_df[col].iloc[0] if len(viz_df) > 0 else "N/A"
+    null_pct = (viz_df[col].isnull().sum() / len(viz_df) * 100).round(2)
+    
+    # Format sample value based on dtype
+    if pd.api.types.is_datetime64_any_dtype(viz_df[col]):
+        sample = str(sample)[:10]  # Just date part for datetime
+    elif pd.api.types.is_numeric_dtype(viz_df[col]):
+        if pd.notnull(sample):
+            try:
+                sample = f"{float(sample):,.2f}"
+            except:
+                sample = str(sample)  # Fallback if formatting fails
+        else:
+            sample = "N/A"
+    else:
+        # Handle non-numeric, non-datetime types
+        sample = str(sample)[:20] if pd.notnull(sample) else "N/A"
+    
+    # Use simpler string formatting to avoid issues
+    print(f"{col:<25} | Type: {dtype:<15} | Example: {sample:<20} | Null: {null_pct}%")
+
+
