@@ -1,0 +1,102 @@
+#0-20 unique, 20-100: multiples of tens + single digits, 0-100: 1 word/2 words
+#100-1000: n 0-9 hundred， 
+#1000+: 0-9 thousand, tens of thousand
+#thousand/hundred/  Up to 2-digits
+#Firstly extract numbers out of text
+#For random 2-digit, when >20, need '-'
+
+#Extract numbers
+def extract_number(text):
+    words = text.split()
+    numbers = {}
+
+    for idx, word in enumerate(words):
+        try:
+            num = int(word)
+            numbers[idx]=num
+        except:
+            pass
+    return words, numbers
+
+#Define two-digit number firstly
+def process_2digits(n):
+
+    ones = ["one", "two", "three", "four", "five", "six", "seven", "eight", "nine"]
+    teens = ["ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen", "seventeen", "eighteen", "nineteen"]
+    tens = ["twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety"]
+    
+    words = []
+
+    if 10 <= n < 20:
+        words.append(teens[n - 10])
+    else:
+        if n >= 20:
+            words.append(tens[n // 10-2])
+            n %= 10 
+        if n > 0:
+            words.append(ones[n-1])
+
+    if len(words) == 2:        
+        return words[0] + "-" + words[1]
+    return words[0]
+
+#Split numbers into n's of thousands/hundreds
+def split_number(n): 
+    n_thousand, digit_hundred = divmod(n, 1000) 
+    n_hundred, digit_ten = divmod(digit_hundred, 100) 
+    return n_thousand, n_hundred, digit_ten
+
+#Transform number to texts
+def number2text(n):
+    text = ""
+    if n==0:
+        text = "zero"
+    n_thousand, n_hundred, digit_ten = split_number(n)
+    if n_thousand > 0:
+        text += process_2digits(n_thousand)
+        if n_hundred >0:
+            text += " thousand, "
+        else:
+            text += " thousand "
+
+    if n_hundred > 0:
+        text += process_2digits(n_hundred)
+        text += " hundred "
+
+    if digit_ten> 0:
+        if text != "":
+            text += "and "
+        text += process_2digits(digit_ten)
+    return text
+
+#extract numbers
+def convert_text(text): 
+    words, numbers = extract_number(text)
+
+    if len(numbers)==0:
+        return text
+    
+
+    for k, v in numbers.items():
+        tmp_text = number2text(v)
+
+        words[k] = tmp_text
+    
+    return " ".join(words)
+
+
+# test the function
+if __name__ == "__main__":
+    texts = [
+        "The painting costs 10001 dollars.",
+        "There are 92341 reasons why you will succeed.",
+        "153",
+        "100",
+        "10531",
+        "The painting costs 10001 dollars, but I have only 9999 dollars.",
+    ]
+    
+    for text in texts:
+        text_converted = convert_text(text)
+        print(text_converted)
+
